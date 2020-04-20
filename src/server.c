@@ -245,9 +245,14 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
 			return false;
 
 		/* set ready only if no tx */
-		if (state == 'I')
-			ready = true;
-		else if (pool_pool_mode(server->pool) == POOL_STMT) {
+		if (state == 'I') {
+			if (server->ps_active > 0 && cf_prepared_statement_lock == 1) {
+				slog_debug(server, "Active PS - can't release server connection yet");
+			} else {
+				slog_debug(server, "No PS - releasing server connection");
+				ready = true;
+			}
+		} else if (pool_pool_mode(server->pool) == POOL_STMT) {
 			disconnect_server(server, true, "transaction blocks not allowed in statement pooling mode");
 			return false;
 		} else if (state == 'T' || state == 'E') {

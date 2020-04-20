@@ -794,11 +794,74 @@ static bool handle_client_startup(PgSocket *client, PktHdr *pkt)
 	return true;
 }
 
+typedef enum {
+	PARSE_TYPE_ANON,		/*  */
+	PARSE_TYPE_NAMED,		/*  */
+	PARSE_TYPE_DEALLOCATE,	/*  */
+} ParseType;
+
+static bool is_deallocate(const char* query) {
+	char copy[11];
+	size_t i;
+
+	for (i = 0; query[i] && i < sizeof(copy) - 1; i++)
+		copy[i] = query[i];
+	copy[i] = 0;
+
+	return strcasecmp(copy, "deallocate") == 0;
+}
+
+static void dump_packet(PgSocket *client, const char* pktType, PktHdr* pkt, ParseType* parseType) {
+	char buf[50];
+	unsigned int i = 0;
+	unsigned int j = 0;
+	char c;
+	char psName[50];
+	char statement[50];
+
+	*parseType = PARSE_TYPE_ANON;
+
+	for (i = 0; i < pkt->len && i < sizeof(buf) - 1; i++) {
+		c = (char) pkt->data.data[i];
+		if (c == 0)
+			buf[i] = '.';
+		else
+			buf[i] = c;
+	}
+	buf[i] = 0;
+	slog_debug(client, "Packet %s (len = %d, read_pos = %d): %s", pktType, (int) pkt->len, (int) pkt->data.read_pos, buf);
+
+	if (pkt->type == 'P') {
+		// 5 because we skip the 'P' and the 4 bytes which are the length of the message
+		j = 0;
+		for (i = 5; i < pkt->len && i < sizeof(psName) - 1 && pkt->data.data[i] != 0; i++)
+			psName[j++] = (char) pkt->data.data[i];
+		psName[j] = 0;
+		if (j == 0) {
+			*parseType = PARSE_TYPE_ANON;
+			strcpy(psName, "<anonymous>");
+		} else {
+			*parseType = PARSE_TYPE_NAMED;
+		}
+
+		j = 0;
+		for (i = i + 1; i < pkt->len && i < sizeof(statement) - 1 && pkt->data.data[i] != 0; i++)
+			statement[j++] = (char) pkt->data.data[i];
+		statement[j] = 0;
+
+		if (*parseType == PARSE_TYPE_ANON && is_deallocate(statement))
+			*parseType = PARSE_TYPE_DEALLOCATE;
+
+		slog_debug(client, "PREPARE: %s = %s", psName, statement);
+	}
+}
+
 /* decide on packets of logged-in client */
 static bool handle_client_work(PgSocket *client, PktHdr *pkt)
 {
 	SBuf *sbuf = &client->sbuf;
 	int rfq_delta = 0;
+	ParseType parse_type = PARSE_TYPE_ANON;
 
 	switch (pkt->type) {
 
@@ -820,6 +883,7 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
 		rfq_delta++;
 		break;
 	case 'H':		/* Flush */
+		slog_debug(client, "Flush");
 		break;
 
 	/* copy end markers */
@@ -832,11 +896,23 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
 	 * to buffer packets until sync or flush is sent by client
 	 */
 	case 'P':		/* Parse */
+		//slog_debug(client, "PARSE: %d", pkt->type);
+		dump_packet(client, "Parse", pkt, &parse_type);
+		break;
 	case 'E':		/* Execute */
+		dump_packet(client, "Execute", pkt, &parse_type);
+		break;
 	case 'C':		/* Close */
+		dump_packet(client, "Close", pkt, &parse_type);
+		break;
 	case 'B':		/* Bind */
+		dump_packet(client, "Bind", pkt, &parse_type);
+		break;
 	case 'D':		/* Describe */
+		dump_packet(client, "Describe", pkt, &parse_type);
+		break;
 	case 'd':		/* CopyData(F/B) */
+		dump_packet(client, "CopyData", pkt, &parse_type);
 		break;
 
 	/* client wants to go away */
@@ -878,6 +954,14 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
 	/* tag the server as dirty */
 	client->link->ready = false;
 	client->link->idle_tx = false;
+	
+	if (parse_type == PARSE_TYPE_NAMED) {
+		slog_debug(client, "PS Active");
+		client->link->ps_active++;
+	} else if (parse_type == PARSE_TYPE_DEALLOCATE) {
+		slog_debug(client, "PS Deallocated");
+		client->link->ps_active = client->link->ps_active == 0 ? 0 : client->link->ps_active - 1;
+	}
 
 	/* forward the packet */
 	sbuf_prepare_send(sbuf, &client->link->sbuf, pkt->len);
