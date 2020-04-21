@@ -119,6 +119,7 @@ extern int cf_sbuf_len;
 #include "janitor.h"
 #include "hba.h"
 #include "pam.h"
+#include "ps.h"
 
 /* to avoid allocations will use static buffers */
 #define MAX_DBNAME	64
@@ -384,9 +385,9 @@ struct PgSocket {
 	bool wait_for_response:1;/* console client: waits for completion of PAUSE/SUSPEND cmd */
 
 	bool wait_sslchar:1;	/* server: waiting for ssl response: S/N */
+	int ps_anon_active:1;		/* client: state of anonymous prepared statement */
 
 	int expect_rfq_count;	/* client: count of ReadyForQuery packets client should see */
-	int ps_active;		/* server: count of active prepared statements (state controlled by client connection) */
 
 	usec_t connect_time;	/* when connection was made */
 	usec_t request_time;	/* last activity time */
@@ -420,6 +421,9 @@ struct PgSocket {
 	VarCache vars;		/* state of interesting server parameters */
 
 	SBuf sbuf;		/* stream buffer, must be last */
+
+	/* struct HashTab *prepared_statements; */ /* named prepared statements (maintained on client connection) */
+	struct PSList prepared_statements; /* named prepared statements (maintained on client connection) */
 };
 
 #define RAW_IOBUF_SIZE	offsetof(IOBuf, buf)
@@ -515,6 +519,8 @@ extern int cf_tcp_user_timeout;
 extern int cf_log_connections;
 extern int cf_log_disconnections;
 extern int cf_log_pooler_errors;
+extern int cf_log_event_stream;
+extern int cf_log_prepared_statements;
 extern int cf_application_name_add_host;
 
 extern int cf_client_tls_sslmode;

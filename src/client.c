@@ -794,66 +794,90 @@ static bool handle_client_startup(PgSocket *client, PktHdr *pkt)
 	return true;
 }
 
-typedef enum {
-	PARSE_TYPE_ANON,		/*  */
-	PARSE_TYPE_NAMED,		/*  */
-	PARSE_TYPE_DEALLOCATE,	/*  */
-} ParseType;
+#define MAX_PS_NAME_LEN 128
 
-static bool is_deallocate(const char* query) {
-	char copy[11];
-	size_t i;
-
-	for (i = 0; query[i] && i < sizeof(copy) - 1; i++)
-		copy[i] = query[i];
-	copy[i] = 0;
-
-	return strcasecmp(copy, "deallocate") == 0;
+static bool is_deallocate(const char* query, char* psName) {
+	const char* deallocate = "deallocate";
+	unsigned i;
+	for (i = 0; query[i]; i++) {
+		if (i < 10 && tolower(query[i]) != deallocate[i])
+			return false;
+		if (i >= 11) {
+			if (i - 11 >= MAX_PS_NAME_LEN)
+				break;
+			psName[i - 11] = query[i];
+		}
+	}
+	psName[i - 11] = 0;
+	return true;
 }
 
-static void dump_packet(PgSocket *client, const char* pktType, PktHdr* pkt, ParseType* parseType) {
-	char buf[50];
-	unsigned int i = 0;
-	unsigned int j = 0;
-	char c;
-	char psName[50];
-	char statement[50];
+static void inspect_parse_packet(PgSocket *client, PktHdr* pkt, bool* isDeallocate, char* psName) {
+	unsigned i;
+	unsigned j;
+	char statement[11 + MAX_PS_NAME_LEN + 1]; // strlen("deallocate ") + MAX_PS_NAME_LEN + 1
 
-	*parseType = PARSE_TYPE_ANON;
+	*isDeallocate = false;
 
-	for (i = 0; i < pkt->len && i < sizeof(buf) - 1; i++) {
-		c = (char) pkt->data.data[i];
-		if (c == 0)
-			buf[i] = '.';
-		else
-			buf[i] = c;
-	}
-	buf[i] = 0;
-	slog_debug(client, "Packet %s (len = %d, read_pos = %d): %s", pktType, (int) pkt->len, (int) pkt->data.read_pos, buf);
+	// Start at 5, because we skip the 'P' and the 4 bytes which are the length of the message
+	j = 0;
+	for (i = 5; i < pkt->len && j < MAX_PS_NAME_LEN && pkt->data.data[i] != 0; i++)
+		psName[j++] = (char) pkt->data.data[i];
+	psName[j] = 0;
 
-	if (pkt->type == 'P') {
-		// 5 because we skip the 'P' and the 4 bytes which are the length of the message
+	j = 0;
+	for (i = i + 1; i < pkt->len && i < sizeof(statement) - 1 && pkt->data.data[i] != 0; i++)
+		statement[j++] = (char) pkt->data.data[i];
+	statement[j] = 0;
+
+	// Expect a DEALLOCATE to come through in an anonymous statement,
+	// subsequent to the use of the named statement
+	*isDeallocate = is_deallocate(statement, psName);
+}
+
+static void inspect_close_packet(PgSocket *client, PktHdr* pkt, char* psName) {
+	unsigned i;
+	unsigned j;
+	// We start parsing at byte 5.
+	// See 'Close' at https://www.postgresql.org/docs/12/protocol-message-formats.html
+	// From the docs: 'S' to close a prepared statement; or 'P' to close a portal.
+	if (pkt->data.data[5] == 'S') {
 		j = 0;
-		for (i = 5; i < pkt->len && i < sizeof(psName) - 1 && pkt->data.data[i] != 0; i++)
+		for (i = 6; i < pkt->len && j < MAX_PS_NAME_LEN && pkt->data.data[i] != 0; i++)
 			psName[j++] = (char) pkt->data.data[i];
 		psName[j] = 0;
-		if (j == 0) {
-			*parseType = PARSE_TYPE_ANON;
-			strcpy(psName, "<anonymous>");
-		} else {
-			*parseType = PARSE_TYPE_NAMED;
-		}
-
-		j = 0;
-		for (i = i + 1; i < pkt->len && i < sizeof(statement) - 1 && pkt->data.data[i] != 0; i++)
-			statement[j++] = (char) pkt->data.data[i];
-		statement[j] = 0;
-
-		if (*parseType == PARSE_TYPE_ANON && is_deallocate(statement))
-			*parseType = PARSE_TYPE_DEALLOCATE;
-
-		slog_debug(client, "PREPARE: %s = %s", psName, statement);
 	}
+}
+
+static void log_client_event_stream(PgSocket *client, PktHdr *pkt) {
+	char content[50];
+	unsigned i;
+	const char* name = "<unrecognized>";
+	switch (pkt->type) {
+	case 'Q': name = "Query"; break;
+	case 'F': name = "FunctionCall"; break;
+	case 'S': name = "Sync"; break;
+	case 'H': name = "Flush"; break;
+	case 'c': name = "CopyDone(F/B)"; break;
+	case 'f': name = "CopyFail(F/B)"; break;
+	case 'P': name = "Parse"; break;
+	case 'E': name = "Execute"; break;
+	case 'C': name = "Close"; break;
+	case 'B': name = "Bind"; break;
+	case 'D': name = "Describe"; break;
+	case 'd': name = "CopyData(F/B)"; break;
+	case 'X': name = "Terminate"; break;
+	}
+
+	for (i = 0; i < pkt->len && i < sizeof(content) - 1; i++) {
+		if (pkt->data.data[i] == 0)
+			content[i] = '.';
+		else
+			content[i] = pkt->data.data[i];
+	}
+	content[i] = 0;
+
+	slog_debug(client, "Event Stream - Client - %c (%s) [%s]", (char) pkt->type, name, content);
 }
 
 /* decide on packets of logged-in client */
@@ -861,7 +885,13 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
 {
 	SBuf *sbuf = &client->sbuf;
 	int rfq_delta = 0;
-	ParseType parse_type = PARSE_TYPE_ANON;
+	char ps_name[MAX_PS_NAME_LEN + 1];
+	bool is_deallocate = false;
+
+	ps_name[0] = 0;
+
+	if (cf_log_event_stream)
+		log_client_event_stream(client, pkt);
 
 	switch (pkt->type) {
 
@@ -896,23 +926,19 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
 	 * to buffer packets until sync or flush is sent by client
 	 */
 	case 'P':		/* Parse */
-		//slog_debug(client, "PARSE: %d", pkt->type);
-		dump_packet(client, "Parse", pkt, &parse_type);
+		inspect_parse_packet(client, pkt, &is_deallocate, ps_name);
 		break;
 	case 'E':		/* Execute */
-		dump_packet(client, "Execute", pkt, &parse_type);
 		break;
 	case 'C':		/* Close */
-		dump_packet(client, "Close", pkt, &parse_type);
+		inspect_close_packet(client, pkt, ps_name);
+		is_deallocate = true;
 		break;
 	case 'B':		/* Bind */
-		dump_packet(client, "Bind", pkt, &parse_type);
 		break;
 	case 'D':		/* Describe */
-		dump_packet(client, "Describe", pkt, &parse_type);
 		break;
 	case 'd':		/* CopyData(F/B) */
-		dump_packet(client, "CopyData", pkt, &parse_type);
 		break;
 
 	/* client wants to go away */
@@ -954,13 +980,25 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
 	/* tag the server as dirty */
 	client->link->ready = false;
 	client->link->idle_tx = false;
-	
-	if (parse_type == PARSE_TYPE_NAMED) {
-		slog_debug(client, "PS Active");
-		client->link->ps_active++;
-	} else if (parse_type == PARSE_TYPE_DEALLOCATE) {
-		slog_debug(client, "PS Deallocated");
-		client->link->ps_active = client->link->ps_active == 0 ? 0 : client->link->ps_active - 1;
+
+	// Handle prepared statements
+	if (cf_prepared_statement_lock) {
+		if (ps_name[0]) {
+			// Named prepared statement
+			if (is_deallocate)
+				ps_unregister(client, ps_name);
+			else
+				ps_register(client, ps_name);
+		} else if (pkt->type == 'P') {
+			// Anonymous prepared statement
+			client->ps_anon_active = 1;
+			if (cf_log_prepared_statements)
+				slog_debug(client, "PS anonymous start");
+		} else if (pkt->type == 'C') {
+			// I haven't seen any clients do this, so issue a warning
+			client->ps_anon_active = 0;
+			slog_debug(client, "Close packet received on anonymous prepared statement");
+		}
 	}
 
 	/* forward the packet */

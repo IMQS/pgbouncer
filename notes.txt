@@ -1,0 +1,78 @@
+
+===================================================================================================================
+#  Protocol flow for Go lib/pq QueryRow that uses Prepared Statement, and returns a single result:
+#  We execute two identical queries, in sequence, to see if there is any shared state between them.
+#  The answer is no - the queries are independent, and identical.
+===================================================================================================================
+
+Event Stream - Client - P (Parse)                  PREPARE: <anonymous> = SELECT sessionkey,$1 FROM authsession LIMIT
+Event Stream - Client - D (Describe)
+Event Stream - Client - S (Sync)
+Event Stream - Server - 1 (ParseComplete)
+Event Stream - Server - t (ParameterDescription)
+Event Stream - Server - T (RowDescription)
+Event Stream - Server - Z (ReadyForQuery)          No PS - releasing server connection
+query time: 435 us
+transaction time: 435 us
+Event Stream - Client - B (Bind)
+Event Stream - Client - E (Execute)
+Event Stream - Client - S (Sync)
+Event Stream - Server - 2 (BindComplete)
+Event Stream - Server - D (DataRow)
+Event Stream - Server - C (CommandComplete)
+Event Stream - Server - Z (ReadyForQuery)          No PS - releasing server connection
+query time: 429 us
+transaction time: 429 us
+
+Event Stream - Client - P (Parse)                  PREPARE: <anonymous> = SELECT sessionkey,$1 FROM authsession LIMIT
+Event Stream - Client - D (Describe)
+Event Stream - Client - S (Sync)
+Event Stream - Server - 1 (ParseComplete)
+Event Stream - Server - t (ParameterDescription)
+Event Stream - Server - T (RowDescription)
+Event Stream - Server - Z (ReadyForQuery)          No PS - releasing server connection
+query time: 146 us
+transaction time: 146 us
+Event Stream - Client - B (Bind)
+Event Stream - Client - E (Execute)
+Event Stream - Client - S (Sync)
+Event Stream - Server - 2 (BindComplete)
+Event Stream - Server - D (DataRow)
+Event Stream - Server - C (CommandComplete)
+Event Stream - Server - Z (ReadyForQuery)          No PS - releasing server connection
+query time: 182 us
+transaction time: 182 us
+closing because: client unexpected eof (age=0s)
+
+===================================================================================================================
+#  Protocol flow for our C++ "dba" library, which uses libpq.
+#  We execute just one statement, because we know that we are stateless.
+===================================================================================================================
+
+Event Stream - Client - P (Parse)                  PREPARE: ps_1 = SELECT iv,tv FROM foo WHERE iv >= $1 LI           PS Active
+Event Stream - Client - S (Sync)
+Event Stream - Server - 1 (ParseComplete)
+Event Stream - Server - Z (ReadyForQuery)          Active PS - can't release server connection yet
+Event Stream - Client - B (Bind)
+Event Stream - Client - D (Describe)
+Event Stream - Client - E (Execute)
+Event Stream - Client - S (Sync)
+Event Stream - Server - 2 (BindComplete)
+Event Stream - Server - T (RowDescription)
+Event Stream - Server - C (CommandComplete)
+Event Stream - Server - Z (ReadyForQuery)          Active PS - can't release server connection yet
+Event Stream - Client - P (Parse)                  PREPARE: <anonymous> = DEALLOCATE "ps_1"                          PS Deallocated
+Event Stream - Client - B (Bind)
+Event Stream - Client - D (Describe)
+Event Stream - Client - E (Execute)
+Event Stream - Client - S (Sync)
+Event Stream - Server - 1 (ParseComplete)
+Event Stream - Server - 2 (BindComplete)
+Event Stream - Server - n (NoData)
+Event Stream - Server - C (CommandComplete)
+Event Stream - Server - Z (ReadyForQuery)          No PS - releasing server connection
+query time: 592 us
+transaction time: 592 us
+Event Stream - Client - X (Terminate)
+closing because: client close request (age=0s)
+

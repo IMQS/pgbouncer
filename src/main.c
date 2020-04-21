@@ -153,6 +153,8 @@ int cf_log_stats;
 int cf_log_connections;
 int cf_log_disconnections;
 int cf_log_pooler_errors;
+int cf_log_event_stream;
+int cf_log_prepared_statements;
 int cf_application_name_add_host;
 
 int cf_client_tls_sslmode;
@@ -290,6 +292,8 @@ CF_ABS("log_stats", CF_INT, cf_log_stats, 0, "1"),
 CF_ABS("log_connections", CF_INT, cf_log_connections, 0, "1"),
 CF_ABS("log_disconnections", CF_INT, cf_log_disconnections, 0, "1"),
 CF_ABS("log_pooler_errors", CF_INT, cf_log_pooler_errors, 0, "1"),
+CF_ABS("log_event_stream", CF_INT, cf_log_event_stream, 0, "0"),
+CF_ABS("log_prepared_statements", CF_INT, cf_log_prepared_statements, 0, "0"),
 CF_ABS("application_name_add_host", CF_INT, cf_application_name_add_host, 0, "0"),
 
 CF_ABS("client_tls_sslmode", CF_LOOKUP(sslmode_map), cf_client_tls_sslmode, CF_NO_RELOAD, "disable"),
