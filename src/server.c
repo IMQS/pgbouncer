@@ -285,7 +285,7 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
 			if (cf_prepared_statement_lock == 1 && client && ps_size(client) > 0) {
 				slog_debug(server, "PS still active on client (%d) - holding server connection", ps_size(client));
 			} else if (cf_prepared_statement_lock == 1 && client && client->ps_anon_active) {
-				slog_debug(server, "PS anonymous active on client (%d) - holding server connection", client->ps_anon_active);
+				slog_debug(server, "PS anonymous active on client - holding server connection");
 			} else {
 				if (cf_prepared_statement_lock)
 					slog_debug(server, "Releasing server connection");
@@ -341,7 +341,7 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
 		/* fallthrough */
 	case 'C':		/* CommandComplete */
 
-		if (client->ps_anon_active) {
+		if (client && client->ps_anon_active) {
 			/*
 			 * Mark the usage of an anonymouse prepared statement, which applies
 			 * regardless of whether the command failed ('E'), or succeeded ('C').
